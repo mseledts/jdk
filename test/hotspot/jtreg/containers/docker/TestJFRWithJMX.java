@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2020, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -58,6 +58,7 @@ import jdk.test.lib.Utils;
 import jdk.test.lib.containers.docker.Common;
 import jdk.test.lib.containers.docker.DockerRunOptions;
 import jdk.test.lib.containers.docker.DockerTestUtils;
+import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 
 import jtreg.SkippedException;
@@ -89,14 +90,18 @@ public class TestJFRWithJMX {
         ProcessBuilder pb = buildDockerJavaProcess(containerName);
         Process p = ProcessTools.startProcess("monitored-container", pb, outputConsumer);
 
-        // wait for the target process to communicate the IP address
-        while(ipAddr.get() == null) {
-            Thread.sleep(100);
+        String ipAddress = "0.0.0.0";
+        if (!isPodman()) {
+            // wait for the target process to communicate the IP address
+            while(ipAddr.get() == null) {
+                Thread.sleep(100);
+            }
+            ipAddress = ipAddr.get();
         }
 
         File transferredRecording = null;
         try {
-            try ( JMXConnector connector = waitForJmxConnection(ipAddr.get(), PORT) ) {
+            try ( JMXConnector connector = waitForJmxConnection(ipAddress, PORT) ) {
                 FlightRecorderMXBean bean = getJfrBean(connector);
 
                 long recordingId = record(bean, HOW_LONG_TO_RECORD_SECONDS * 1000);
@@ -113,6 +118,14 @@ public class TestJFRWithJMX {
 
         System.out.println("Recording was transferred to: " + transferredRecording.getPath());
         verifyRecording(transferredRecording);
+    }
+
+    static boolean isPodman() throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(Container.ENGINE_COMMAND, "--version");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start());
+        boolean isPodman = out.getOutput().toLowerCase().contains("podman");
+        System.out.println("isPodman() returning: " + isPodman);
+        return isPodman;
     }
 
     static ProcessBuilder buildDockerJavaProcess(String containerName) throws Exception {
