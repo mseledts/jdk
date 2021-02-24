@@ -68,6 +68,8 @@ public class TestJFRWithJMX {
     static final String imageName = Common.imageName("jfr-jmx");
     static final int PORT = 9010;
     static final int HOW_LONG_TO_RECORD_SECONDS = 10;
+    static final String LOCAL_HOST_ADDR = "0.0.0.0";
+    static final int WAIT_FOR_JMX_CONN_SECONDS = 10;
 
     static final AtomicReference<String> ipAddr = new AtomicReference();
 
@@ -90,14 +92,21 @@ public class TestJFRWithJMX {
         ProcessBuilder pb = buildDockerJavaProcess(containerName);
         Process p = ProcessTools.startProcess("monitored-container", pb, outputConsumer);
 
-        String ipAddress = "0.0.0.0";
-        if (!isPodman()) {
-            // wait for the target process to communicate the IP address
-            while(ipAddr.get() == null) {
-                Thread.sleep(100);
-            }
-            ipAddress = ipAddr.get();
+        // Wait for the target process to communicate the IP address.
+        // Even if IP address is not used (e.g. in PodMan case), we should still wait to make sure
+        // that target JVM process is up and ready.
+        while(ipAddr.get() == null) {
+           System.out.println("waiting for ipAddr.get()");
+           Thread.sleep(100);
         }
+
+        // Now that the receiving JVM process is up and running, check it's PodMan network info
+        boolean isPodman = isPodman();
+        if (isPodman) {
+            printPodmanNetworkInfo();
+        }
+        String ipAddress = isPodman ? LOCAL_HOST_ADDR : ipAddr.get();
+        System.out.println("ipAddress = " + ipAddress);
 
         File transferredRecording = null;
         try {
@@ -126,6 +135,13 @@ public class TestJFRWithJMX {
         boolean isPodman = out.getOutput().toLowerCase().contains("podman");
         System.out.println("isPodman() returning: " + isPodman);
         return isPodman;
+    }
+
+    static void printPodmanNetworkInfo() throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(Container.ENGINE_COMMAND, "port", "-l");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start());
+        System.out.println("-------------------- checkPodmanNetworkInfo: \n" + out.getOutput());
+        System.out.println("--------------------");
     }
 
     static ProcessBuilder buildDockerJavaProcess(String containerName) throws Exception {
@@ -197,15 +213,24 @@ public class TestJFRWithJMX {
     // try connecting in a loop, it may take some time for target process to be ready for JMX connection
     static JMXConnector waitForJmxConnection(String host, int port) throws Exception {
         String urlPath = "/jndi/rmi://" + host + ":" + port + "/jmxrmi";
+        System.out.println("urlPath: " + urlPath);
         JMXServiceURL url = new JMXServiceURL("rmi", "", 0, urlPath);
-        while (true) {
+
+        IOException lastReportedException = null;
+        for (int i=0; i<WAIT_FOR_JMX_CONN_SECONDS; i++) {
             try {
                 return JMXConnectorFactory.connect(url);
             } catch (IOException e) {
                 System.out.println("establishJmxConnection() thrown IOException: " + e.getMessage());
+                lastReportedException = e;
             }
             Thread.sleep(1000);
         }
+
+        if (lastReportedException != null) {
+            lastReportedException.printStackTrace();
+        }
+        throw new RuntimeException("Failed to establish JMX connection after N attempts");
     }
 
     static FlightRecorderMXBean getJfrBean(JMXConnector connector) throws Exception {
