@@ -33,16 +33,13 @@
  *          jdk.jartool/sun.tools.jar
  * @library /test/lib
  * @build EventGeneratorLoop
- * @run driver TestJcmdWithSideCar
+ * @run driver TestJcmd
  */
-import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import jdk.test.lib.Container;
+import jdk.test.lib.JDKToolFinder;
 import jdk.test.lib.Utils;
 import jdk.test.lib.containers.docker.Common;
 import jdk.test.lib.containers.docker.DockerRunOptions;
@@ -57,22 +54,20 @@ public class TestJcmd {
     private static final String CONTAINER_NAME = "test-container";
 
     public static void main(String[] args) throws Exception {
-        if (!DockerTestUtils.canTestDocker()) {
-            return;
-        }
-
+        DockerTestUtils.canTestDocker();
         DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, "Dockerfile-BasicTest", "jdk-docker");
 
         try {
-            Process p = startObservedContainer();
+            long uid = getId("-u");
+            long gid = getId("-g");
 
-            long pid = testJcmdGetPid();
+            Process p = startObservedContainer(uid, gid);
+
+            // Need to get PID from the host point of view
+            long pid = getPid("EventGeneratorLoop");
 
             assertIsAlive(p);
             testJcmdHelp(pid);
-
-            assertIsAlive(p);
-            testJcmdVmInfo(pid);
 
             p.waitFor();
         } finally {
@@ -81,76 +76,77 @@ public class TestJcmd {
     }
 
 
-    // Run "jcmd -l" in a sidecar container, find a target process.
-    private static long testJcmdGetPid() throws Exception {
-        System.out.println("testJcmdGetPid()");
-        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "-l");
-        OutputAnalyzer out = new OutputAnalyzer(pb.start())
-            .shouldHaveExitValue(0)
-            .shouldContain("sun.tools.jcmd.JCmd");
-        long pid = findProcess(out, "EventGeneratorLoop");
-        if (pid == -1) {
-            throw new RuntimeException("Could not find specified process");
-        }
+    // Note: userId and groupId of the container should match those of the inspecting process
+    private static Process startObservedContainer(long userId, long groupId) throws Exception {
+        DockerRunOptions opts = new DockerRunOptions(IMAGE_NAME, "/jdk/bin/java", "EventGeneratorLoop");
+        opts.addDockerOpts("--volume", Utils.TEST_CLASSES + ":/test-classes/")
+            .addJavaOpts("-cp", "/test-classes/")
+            .addDockerOpts("--cap-add=SYS_PTRACE")
+            .addDockerOpts("--name", CONTAINER_NAME)
+            .addDockerOpts("--user", userId + ":" + groupId)
+            .addJavaOpts("-XX:+UsePerfData") // TODO: do we really need this one
+            .addClassOptions("" + TIME_TO_RUN_MAIN_PROCESS);
 
-        return pid;
+        // avoid large Xmx
+        opts.appendTestJavaOptions = false;
+
+        List<String> cmd = DockerTestUtils.buildJavaCommand(opts);
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        return ProcessTools.startProcess("main-container-process",
+                                      pb,
+                                      line -> line.contains(EventGeneratorLoop.MAIN_METHOD_STARTED),
+                                      5, TimeUnit.SECONDS);
     }
 
     private static void testJcmdHelp(long pid) throws Exception {
         System.out.println("testJcmdHelp()");
         ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "" + pid, "help");
+        System.out.println("testJcmdHelp(): cmd line: " + ProcessTools.getCommandLine(pb));
         OutputAnalyzer out = new OutputAnalyzer(pb.start())
             .shouldHaveExitValue(0)
             .shouldContain("Java System Properties")
             .shouldContain("VM Flags");
     }
 
-    // test some other JCMD command (VM.info, VM.version)
-    private static void testJcmdVmInfo(long pid) throws Exception {
+    private static void testJcmdVmVersion(long pid) throws Exception {
         // TODO: implement
     }
 
-
-    // Returns PID of a matching process, or -1 if not found.
-    private static long findProcess(OutputAnalyzer out, String name) throws Exception {
-        List<String> l = out.asLines()
-            .stream()
-            .filter(s -> s.contains(name))
-            .collect(Collectors.toList());
-        if (l.isEmpty()) {
-            return -1;
-        }
-        String psInfo = l.get(0);
-        System.out.println("findProcess(): psInfo: " + psInfo);
-        String pid = psInfo.substring(0, psInfo.indexOf(' '));
-        System.out.println("findProcess(): pid: " + pid);
-        return Long.parseLong(pid);
-    }
-
-    public static Process startObservedContainer() throws Exception {
-        DockerRunOptions opts = new DockerRunOptions(IMAGE_NAME, "/jdk/bin/java", "EventGeneratorLoop");
-        opts.addDockerOpts("--volume", Utils.TEST_CLASSES + ":/test-classes/")
-            .addJavaOpts("-cp", "/test-classes/")
-            .addDockerOpts("--cap-add=SYS_PTRACE")
-            .addDockerOpts("--name", CONTAINER_NAME)
-            .addJavaOpts("-XX:+UsePerfData") // TODO: do we really need this one
-            .addClassOptions("" + TIME_TO_RUN_MAIN_PROCESS);
-        // avoid large Xmx
-        opts.appendTestJavaOptions = false;
-
-        List<String> cmd = DockerTestUtils.buildJavaCommand(opts);
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        p = ProcessTools.startProcess("main-container-process",
-                                      pb,
-                                      line -> line.contains(EventGeneratorLoop.MAIN_METHOD_STARTED),
-                                      5, TimeUnit.SECONDS);
-        return p;
-    }
-
-    public static void assertIsAlive(Process p) throws Exception {
+    private static void assertIsAlive(Process p) throws Exception {
         if (!p.isAlive()) {
             throw new RuntimeException("Main container process stopped unexpectedly, exit value: "
                                        + p.exitValue());
         }
+    }
+
+    private static long getPid(String name) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("ps", "-ef");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0);
+
+        List<String> l = out.asLines()
+            .stream()
+            .filter(s -> s.contains(name))
+            .collect(Collectors.toList());
+
+        if (l.isEmpty()) {
+            throw new RuntimeException("Could not find process matching " + name);
+        }
+
+        String psInfo = l.get(0);
+        System.out.println("getPid(): psInfo: " + psInfo);
+        String pid = psInfo.split("\\s+", 10)[1];
+        System.out.println("getPid(): pid: " + pid);
+        return Long.parseLong(pid);
+    }
+
+    // -u for userId, -g for groupId
+    private static long getId(String param) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("id", param);
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0);
+        long uid = Long.parseLong(out.asLines().get(0));
+        System.out.println("getId() " + param + " returning: " + uid);
+        return uid;
     }
 }
