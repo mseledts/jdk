@@ -57,23 +57,19 @@ public class TestJcmd {
     public static void main(String[] args) throws Exception {
         DockerTestUtils.canTestDocker();
 
-        // Note: userId and groupId of the container should match those of the inspecting process
+        // Need to create a custom dockerfile where user name and id, as well as group name and id
+        // of the JVM running in container must match the ones from the inspecting JCMD process.
         String uid = getId("-u");
         String gid = getId("-g");
         String userName = getId("-un");
         String groupName = getId("-gn");
         String content = generateCustomDockerfile(uid, gid, userName, groupName);
-        DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, "Dockerfile-Jcmd", "jcmd-docker", content);
+        DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, content);
 
         try {
 
             Process p = startObservedContainer();
-
-            // Need to get PID from the host point of view
-            // long pid = getPid("EventGeneratorLoop");
-            long pid = testJcmdGetPid();
-
-            Thread.sleep(10*1000);
+            long pid = testJcmdGetPid("EventGeneratorLoop");
 
             assertIsAlive(p);
             testJcmdHelp(pid);
@@ -122,38 +118,25 @@ public class TestJcmd {
                                       5, TimeUnit.SECONDS);
     }
     // Run "jcmd -l" in a sidecar container, find a target process.
-    private static long testJcmdGetPid() throws Exception {
+    private static long testJcmdGetPid(String className) throws Exception {
         System.out.println("testJcmdGetPid()");
         ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "-l");
         OutputAnalyzer out = new OutputAnalyzer(pb.start())
-            .shouldHaveExitValue(0)
-            .shouldContain("sun.tools.jcmd.JCmd");
+            .shouldHaveExitValue(0);
 
         System.out.println("------------------ jcmd -l output: ");
         System.out.println(out.getOutput());
         System.out.println("-----------------------------------");
 
-        long pid = findProcess(out, "EventGeneratorLoop");
-        if (pid == -1) {
+        List<String> l = out.asLines()
+            .stream()
+            .filter(s -> s.contains(className))
+            .collect(Collectors.toList());
+        if (l.isEmpty()) {
             throw new RuntimeException("Could not find specified process");
         }
 
-        return pid;
-    }
-
-    // Returns PID of a matching process, or -1 if not found.
-    private static long findProcess(OutputAnalyzer out, String name) throws Exception {
-        List<String> l = out.asLines()
-            .stream()
-            .filter(s -> s.contains(name))
-            .collect(Collectors.toList());
-        if (l.isEmpty()) {
-            return -1;
-        }
-        String psInfo = l.get(0);
-        System.out.println("findProcess(): psInfo: " + psInfo);
-        String pid = psInfo.substring(0, psInfo.indexOf(' '));
-        System.out.println("findProcess(): pid: " + pid);
+        String pid = l.get(0).split("\\s+", 3)[0];
         return Long.parseLong(pid);
     }
 
@@ -178,27 +161,6 @@ public class TestJcmd {
             throw new RuntimeException("Main container process stopped unexpectedly, exit value: "
                                        + p.exitValue());
         }
-    }
-
-    private static long getPid(String name) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("ps", "-ef");
-        OutputAnalyzer out = new OutputAnalyzer(pb.start())
-            .shouldHaveExitValue(0);
-
-        List<String> l = out.asLines()
-            .stream()
-            .filter(s -> s.contains(name))
-            .collect(Collectors.toList());
-
-        if (l.isEmpty()) {
-            throw new RuntimeException("Could not find process matching " + name);
-        }
-
-        String psInfo = l.get(0);
-        System.out.println("getPid(): psInfo: " + psInfo);
-        String pid = psInfo.split("\\s+", 10)[1];
-        System.out.println("getPid(): pid: " + pid);
-        return Long.parseLong(pid);
     }
 
     // -u for userId, -g for groupId
