@@ -120,8 +120,11 @@ public class DockerTestUtils {
         return true;
     }
 
+    public static void buildJdkDockerImage(String imageName, String dockerfile, String buildDirName) throws Exception {
+        buildJdkDockerImage(imageName, dockerfile, buildDirName, null);
+    }
 
-    /**
+     /**
      * Build a docker image that contains JDK under test.
      * The jdk will be placed under the "/jdk/" folder inside the docker file system.
      *
@@ -134,7 +137,7 @@ public class DockerTestUtils {
      * @throws Exception
      */
     public static void
-        buildJdkDockerImage(String imageName, String dockerfile, String buildDirName)
+        buildJdkDockerImage(String imageName, String dockerfile, String buildDirName, String dockerfileContent)
             throws Exception {
 
         Path buildDir = Paths.get(".", buildDirName);
@@ -150,9 +153,29 @@ public class DockerTestUtils {
         // Copy JDK-under-test tree to the docker build directory.
         // This step is required for building a docker image.
         Files.walkFileTree(jdkSrcDir, new CopyFileVisitor(jdkSrcDir, jdkDstDir));
-        buildDockerImage(imageName, Paths.get(Utils.TEST_SRC, dockerfile), buildDir);
+        buildDockerImage(imageName, Paths.get(Utils.TEST_SRC, dockerfile), buildDir, dockerfileContent);
     }
 
+
+    // TODO: provide a full javadoc header
+    // TODO: deduplicate the methods
+    public static void
+        buildDockerImage(String imageName, Path dockerfile,
+                         Path buildDir, String dockerFileContent) throws Exception {
+
+        Files.writeString(buildDir.resolve("Dockerfile"), dockerFileContent);
+
+        try {
+            // Build the docker
+            execute(Container.ENGINE_COMMAND, "build", "--no-cache", "--tag", imageName, buildDir.toString())
+                .shouldHaveExitValue(0);
+        } catch (Exception e) {
+            // If docker image building fails there is a good chance it happens due to environment and/or
+            // configuration other than product failure. Throw jtreg skipped exception in such case
+            // instead of failing the test.
+            throw new SkippedException("Building docker image failed. Details: \n" + e.getMessage());
+        }
+    }
 
     /**
      * Build a docker image based on given docker file and docker build directory.

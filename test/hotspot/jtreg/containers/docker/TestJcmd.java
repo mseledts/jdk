@@ -43,6 +43,7 @@ import jdk.test.lib.JDKToolFinder;
 import jdk.test.lib.Utils;
 import jdk.test.lib.containers.docker.Common;
 import jdk.test.lib.containers.docker.DockerRunOptions;
+import jdk.test.lib.containers.docker.DockerfileConfig;
 import jdk.test.lib.containers.docker.DockerTestUtils;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
@@ -55,16 +56,24 @@ public class TestJcmd {
 
     public static void main(String[] args) throws Exception {
         DockerTestUtils.canTestDocker();
-        DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, "Dockerfile-BasicTest", "jdk-docker");
+
+        // Note: userId and groupId of the container should match those of the inspecting process
+        String uid = getId("-u");
+        String gid = getId("-g");
+        String userName = getId("-un");
+        String groupName = getId("-gn");
+        String content = generateCustomDockerfile(uid, gid, userName, groupName);
+        DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, "Dockerfile-Jcmd", "jcmd-docker", content);
 
         try {
-            long uid = getId("-u");
-            long gid = getId("-g");
 
-            Process p = startObservedContainer(uid, gid);
+            Process p = startObservedContainer();
 
             // Need to get PID from the host point of view
-            long pid = getPid("EventGeneratorLoop");
+            // long pid = getPid("EventGeneratorLoop");
+            long pid = testJcmdGetPid();
+
+            Thread.sleep(10*1000);
 
             assertIsAlive(p);
             testJcmdHelp(pid);
@@ -75,15 +84,30 @@ public class TestJcmd {
         }
     }
 
+    private static String generateCustomDockerfile(String uid, String gid,
+                                            String userName, String groupName) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("FROM %s:%s\n", DockerfileConfig.getBaseImageName(),
+                                DockerfileConfig.getBaseImageVersion()));
+        sb.append("COPY /jdk /jdk\n");
+        sb.append("ENV JAVA_HOME=/jdk\n");
 
-    // Note: userId and groupId of the container should match those of the inspecting process
-    private static Process startObservedContainer(long userId, long groupId) throws Exception {
+        sb.append(String.format("RUN groupadd --gid %s %s \n", gid, groupName));
+        sb.append(String.format("RUN useradd  --uid %s --gid %s %s \n", uid, gid, userName));
+        sb.append(String.format("USER %s \n", userName));
+
+        sb.append("CMD [\"/bin/bash\"]\n");
+
+        return sb.toString();
+    }
+
+
+    private static Process startObservedContainer() throws Exception {
         DockerRunOptions opts = new DockerRunOptions(IMAGE_NAME, "/jdk/bin/java", "EventGeneratorLoop");
         opts.addDockerOpts("--volume", Utils.TEST_CLASSES + ":/test-classes/")
             .addJavaOpts("-cp", "/test-classes/")
             .addDockerOpts("--cap-add=SYS_PTRACE")
             .addDockerOpts("--name", CONTAINER_NAME)
-            .addDockerOpts("--user", userId + ":" + groupId)
             .addJavaOpts("-XX:+UsePerfData") // TODO: do we really need this one
             .addClassOptions("" + TIME_TO_RUN_MAIN_PROCESS);
 
@@ -97,6 +121,41 @@ public class TestJcmd {
                                       line -> line.contains(EventGeneratorLoop.MAIN_METHOD_STARTED),
                                       5, TimeUnit.SECONDS);
     }
+    // Run "jcmd -l" in a sidecar container, find a target process.
+    private static long testJcmdGetPid() throws Exception {
+        System.out.println("testJcmdGetPid()");
+        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "-l");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0)
+            .shouldContain("sun.tools.jcmd.JCmd");
+
+        System.out.println("------------------ jcmd -l output: ");
+        System.out.println(out.getOutput());
+        System.out.println("-----------------------------------");
+
+        long pid = findProcess(out, "EventGeneratorLoop");
+        if (pid == -1) {
+            throw new RuntimeException("Could not find specified process");
+        }
+
+        return pid;
+    }
+
+    // Returns PID of a matching process, or -1 if not found.
+    private static long findProcess(OutputAnalyzer out, String name) throws Exception {
+        List<String> l = out.asLines()
+            .stream()
+            .filter(s -> s.contains(name))
+            .collect(Collectors.toList());
+        if (l.isEmpty()) {
+            return -1;
+        }
+        String psInfo = l.get(0);
+        System.out.println("findProcess(): psInfo: " + psInfo);
+        String pid = psInfo.substring(0, psInfo.indexOf(' '));
+        System.out.println("findProcess(): pid: " + pid);
+        return Long.parseLong(pid);
+    }
 
     private static void testJcmdHelp(long pid) throws Exception {
         System.out.println("testJcmdHelp()");
@@ -104,8 +163,10 @@ public class TestJcmd {
         System.out.println("testJcmdHelp(): cmd line: " + ProcessTools.getCommandLine(pb));
         OutputAnalyzer out = new OutputAnalyzer(pb.start())
             .shouldHaveExitValue(0)
-            .shouldContain("Java System Properties")
-            .shouldContain("VM Flags");
+            .shouldContain("JFR.start")
+            .shouldContain("VM.version");
+        // TODO: remove
+        System.out.println("testJcmdHelp(): ----------------: " + out.getOutput());
     }
 
     private static void testJcmdVmVersion(long pid) throws Exception {
@@ -141,12 +202,12 @@ public class TestJcmd {
     }
 
     // -u for userId, -g for groupId
-    private static long getId(String param) throws Exception {
+    private static String getId(String param) throws Exception {
         ProcessBuilder pb = new ProcessBuilder("id", param);
         OutputAnalyzer out = new OutputAnalyzer(pb.start())
             .shouldHaveExitValue(0);
-        long uid = Long.parseLong(out.asLines().get(0));
-        System.out.println("getId() " + param + " returning: " + uid);
-        return uid;
+        String result = out.asLines().get(0);
+        System.out.println("getId() " + param + " returning: " + result);
+        return result;
     }
 }
