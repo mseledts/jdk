@@ -35,6 +35,11 @@
  * @build EventGeneratorLoop
  * @run driver TestJcmd
  */
+
+// TODO: remove
+import java.util.Date;
+
+
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -51,8 +56,9 @@ import jdk.test.lib.process.ProcessTools;
 
 public class TestJcmd {
     private static final String IMAGE_NAME = Common.imageName("jcmd");
-    private static final int TIME_TO_RUN_MAIN_PROCESS = (int) (30 * Utils.TIMEOUT_FACTOR); // seconds
+    private static final int TIME_TO_RUN_CONTAINER_PROCESS = (int) (10 * Utils.TIMEOUT_FACTOR); // seconds
     private static final String CONTAINER_NAME = "test-container";
+
 
     public static void main(String[] args) throws Exception {
         DockerTestUtils.canTestDocker();
@@ -67,17 +73,62 @@ public class TestJcmd {
         DockerTestUtils.buildJdkDockerImage(IMAGE_NAME, content);
 
         try {
-
             Process p = startObservedContainer();
             long pid = testJcmdGetPid("EventGeneratorLoop");
 
             assertIsAlive(p);
             testJcmdHelp(pid);
 
+            assertIsAlive(p);
+            testVmInfo(pid);
+
             p.waitFor();
         } finally {
             DockerTestUtils.removeDockerImage(IMAGE_NAME);
         }
+    }
+
+
+    // Run "jcmd -l" in a sidecar container, find the target process.
+    private static long testJcmdGetPid(String className) throws Exception {
+        System.out.println("TestCase: testJcmdGetPid()");
+        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "-l");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0);
+
+        System.out.println("------------------ jcmd -l output: ");
+        System.out.println(out.getOutput());
+        System.out.println("-----------------------------------");
+
+        List<String> l = out.asLines()
+            .stream()
+            .filter(s -> s.contains(className))
+            .collect(Collectors.toList());
+        if (l.isEmpty()) {
+            throw new RuntimeException("Could not find specified process");
+        }
+
+        String pid = l.get(0).split("\\s+", 3)[0];
+        return Long.parseLong(pid);
+    }
+
+
+    private static void testJcmdHelp(long pid) throws Exception {
+        System.out.println("TestCase: testJcmdHelp()");
+        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "" + pid, "help");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0)
+            .shouldContain("JFR.start")
+            .shouldContain("VM.version");
+    }
+
+    private static void testVmInfo(long pid) throws Exception {
+        System.out.println("TestCase: testVmInfo()");
+        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "" + pid, "VM.info");
+        OutputAnalyzer out = new OutputAnalyzer(pb.start())
+            .shouldHaveExitValue(0)
+            .shouldContain("vm_info")
+            .shouldContain("VM Arguments");
     }
 
     private static String generateCustomDockerfile(String uid, String gid,
@@ -105,7 +156,7 @@ public class TestJcmd {
             .addDockerOpts("--cap-add=SYS_PTRACE")
             .addDockerOpts("--name", CONTAINER_NAME)
             .addJavaOpts("-XX:+UsePerfData") // TODO: do we really need this one
-            .addClassOptions("" + TIME_TO_RUN_MAIN_PROCESS);
+            .addClassOptions("" + TIME_TO_RUN_CONTAINER_PROCESS);
 
         // avoid large Xmx
         opts.appendTestJavaOptions = false;
@@ -117,44 +168,7 @@ public class TestJcmd {
                                       line -> line.contains(EventGeneratorLoop.MAIN_METHOD_STARTED),
                                       5, TimeUnit.SECONDS);
     }
-    // Run "jcmd -l" in a sidecar container, find a target process.
-    private static long testJcmdGetPid(String className) throws Exception {
-        System.out.println("testJcmdGetPid()");
-        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "-l");
-        OutputAnalyzer out = new OutputAnalyzer(pb.start())
-            .shouldHaveExitValue(0);
 
-        System.out.println("------------------ jcmd -l output: ");
-        System.out.println(out.getOutput());
-        System.out.println("-----------------------------------");
-
-        List<String> l = out.asLines()
-            .stream()
-            .filter(s -> s.contains(className))
-            .collect(Collectors.toList());
-        if (l.isEmpty()) {
-            throw new RuntimeException("Could not find specified process");
-        }
-
-        String pid = l.get(0).split("\\s+", 3)[0];
-        return Long.parseLong(pid);
-    }
-
-    private static void testJcmdHelp(long pid) throws Exception {
-        System.out.println("testJcmdHelp()");
-        ProcessBuilder pb = new ProcessBuilder(JDKToolFinder.getJDKTool("jcmd"), "" + pid, "help");
-        System.out.println("testJcmdHelp(): cmd line: " + ProcessTools.getCommandLine(pb));
-        OutputAnalyzer out = new OutputAnalyzer(pb.start())
-            .shouldHaveExitValue(0)
-            .shouldContain("JFR.start")
-            .shouldContain("VM.version");
-        // TODO: remove
-        System.out.println("testJcmdHelp(): ----------------: " + out.getOutput());
-    }
-
-    private static void testJcmdVmVersion(long pid) throws Exception {
-        // TODO: implement
-    }
 
     private static void assertIsAlive(Process p) throws Exception {
         if (!p.isAlive()) {
@@ -162,6 +176,7 @@ public class TestJcmd {
                                        + p.exitValue());
         }
     }
+
 
     // -u for userId, -g for groupId
     private static String getId(String param) throws Exception {
